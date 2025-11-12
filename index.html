@@ -73,8 +73,39 @@
       maxZoom: 19, attribution: '&copy; OpenStreetMap'
     }).addTo(map);
 
-    // --- State ---
+    // --- Remote config & State ---
+    // If you set a Google Apps Script Web App URL here, data will be shared globally.
+    // Leave empty to keep using local-only storage.
+    const REMOTE_ENDPOINT = '';
+
     let sightings = loadSightings(); // Array of {lat, lng, ts}
+    let syncing = false;
+
+    async function syncFromRemote() {
+      if(!REMOTE_ENDPOINT) return; // skip if not configured
+      try {
+        const res = await fetch(REMOTE_ENDPOINT, { method: 'GET' });
+        const json = await res.json();
+        if(json && Array.isArray(json.data)){
+          sightings = json.data
+            .filter(p => typeof p.lat==='number' && typeof p.lng==='number')
+            .map(p => ({ lat: p.lat, lng: p.lng, ts: p.ts || Date.now() }));
+          saveSightings();
+          refresh();
+        }
+      } catch (e) { console.warn('Remote sync failed', e); }
+    }
+
+    async function postSightingRemote(pt){
+      if(!REMOTE_ENDPOINT) return;
+      try {
+        await fetch(REMOTE_ENDPOINT, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(pt)
+        });
+      } catch(e){ console.warn('Remote post failed', e); }
+    }
+
     const markers = L.layerGroup().addTo(map);
     const heatLayer = L.heatLayer([], { radius: 22, blur: 18, minOpacity: 0.25 });
     const gridLayer = L.geoJSON(null, { style: feature => gridStyle(feature) });
@@ -182,10 +213,14 @@
       adding = false; addBtn.classList.remove('toggled');
     });
 
-    map.on('click', (e) => {
+    map.on('click', async (e) => {
       if(!adding) return;
       const { lat, lng } = e.latlng;
-      sightings.push({ lat, lng, ts: Date.now() });
+      const pt = { lat, lng, ts: Date.now() };
+      sightings.push(pt);
+      refresh();
+      postSightingRemote(pt);
+    });
       refresh();
     });
 
@@ -253,6 +288,8 @@
     refresh();
     heatLayer.addTo(map);
     gridLayer.addTo(map);
+    // Try to fetch shared data if endpoint is configured
+    syncFromRemote();
   </script>
 </body>
 </html>

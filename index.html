@@ -99,10 +99,14 @@
     async function postSightingRemote(pt){
       if(!REMOTE_ENDPOINT) return;
       try {
-        await fetch(REMOTE_ENDPOINT, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+        // Use no-cors + text/plain to avoid CORS preflight for Apps Script
+        await fetch(REMOTE_ENDPOINT + '?ua=' + encodeURIComponent(navigator.userAgent), {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify(pt)
         });
+        // We can't read the response in no-cors mode, but the Sheet will record the row.
       } catch(e){ console.warn('Remote post failed', e); }
     }
 

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Cat Spotter Map</title>
+  <title>Cat Spotter — Kernel Heatmap Only</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous" />
   <style>
     html, body { height: 100%; margin: 0; }
@@ -15,57 +15,34 @@
       display: grid; gap: 8px; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
     }
     .control h1 { font-size: 16px; margin: 0 0 6px; }
-    .control .row { display: flex; gap: 8px; flex-wrap: wrap; }
-    button, input[type="file"]::file-selector-button {
+    .control .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    button {
       border: 0; border-radius: 10px; padding: 8px 10px; cursor: pointer;
       background: #111; color: #fff; font-weight: 600;
     }
     button.secondary { background: #f2f2f2; color: #111; }
     button.toggled { outline: 2px solid #111; }
-    .legend { position: absolute; bottom: 12px; left: 12px; z-index: 1000;
-      background: #ffffffee; padding: 10px; border-radius: 10px; box-shadow: 0 6px 20px rgba(0,0,0,.15);
-      font-size: 12px; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-    }
-    .legend .scale { display: flex; height: 10px; width: 160px; border-radius: 6px; overflow: hidden; margin-top: 6px; }
-    .legend .scale > i { flex: 1; }
-    .count { font-weight: 700; }
     .notice { font-size: 12px; color: #444; }
-    .file { font-size: 12px; }
+    .count { font-weight: 700; }
   </style>
 </head>
 <body>
-  <div id="map" aria-label="Map of cat sightings"></div>
+  <div id="map" aria-label="Map of cat sightings (heat only)"></div>
 
   <div class="control" role="region" aria-label="Controls">
     <h1>🐾 Cat Spotter</h1>
     <div class="row">
       <button id="addBtn" title="Click, then tap the map to add a sighting">Add sighting</button>
       <button id="stopBtn" class="secondary" title="Stop placing points">Stop adding</button>
-      <button id="exportBtn" class="secondary" title="Download all sightings as JSON">Export JSON</button>
-      <label class="file">
-        <input id="importInput" type="file" accept="application/json" style="display:none;">
-        <span id="importProxy" role="button" tabindex="0">Import JSON…</span>
-      </label>
-      <button id="clearBtn" class="secondary" title="Remove all data (local only)">Clear</button>
-    </div>
-    <div class="row">
-      <button id="pointsToggle" class="secondary toggled">Points</button>
-      <button id="heatToggle" class="secondary toggled">Heat (kernel)</button>
-      <button id="gridToggle" class="secondary toggled">Heat (500×500 m grid)</button>
     </div>
     <div class="row notice">
       <span>Total sightings: <span id="count" class="count">0</span></span>
+      <span id="status" aria-live="polite"></span>
     </div>
-  </div>
-
-  <div class="legend" aria-label="Grid heat legend">
-    <div>Cells: cats per 500×500 m</div>
-    <div class="scale" id="legendScale"></div>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-  <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
     // --- Map setup ---
@@ -74,219 +51,80 @@
       maxZoom: 19, attribution: '&copy; OpenStreetMap'
     }).addTo(map);
 
-    // --- Supabase config & State ---
-    // Fill these two values from your Supabase project settings
+    // --- Supabase config ---
     const SUPABASE_URL = 'https://diinrjgkyouofzbeqtyu.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRpaW5yamdreW91b2Z6YmVxdHl1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI5ODkyMTYsImV4cCI6MjA3ODU2NTIxNn0.em0Vqr8Qxyqe9s3rupXZEHBKV4eC1sgLINK2k14dYq4';
     const sb = (window.supabase) ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
-    let sightings = loadSightings(); // Array of {lat, lng, ts}
+    // --- State (in-memory only; no localStorage) ---
+    let sightings = []; // [{lat, lng, ts}]
 
-    async function syncFromRemote() {
-      if(!sb) return; // skip if not configured
-      try {
-        const { data, error } = await sb.from('sightings')
-          .select('ts,lat,lng')
-          .order('ts', { ascending: true })
-          .limit(10000);
-        if(!error && Array.isArray(data)){
-          sightings = data.map(r => ({ lat: Number(r.lat), lng: Number(r.lng), ts: Number(r.ts) || Date.now() }));
-          saveSightings();
-          refresh();
-        } else if (error) { console.warn('Supabase select error', error); }
-      } catch (e) { console.warn('Remote sync failed', e); }
-    }
+    const heatLayer = L.heatLayer([], { radius: 22, blur: 18, minOpacity: 0.25 }).addTo(map);
 
-    async function postSightingRemote(pt){
-      if(!sb) return;
-      try {
-        const { error } = await sb.from('sightings').insert({ ts: pt.ts, lat: pt.lat, lng: pt.lng, ua: navigator.userAgent });
-        if(error) console.warn('Supabase insert error', error);
-      } catch(e){ console.warn('Remote post failed', e); }
-    }
-
-    const markers = L.layerGroup().addTo(map);
-    const heatLayer = L.heatLayer([], { radius: 22, blur: 18, minOpacity: 0.25 });
-    const gridLayer = L.geoJSON(null, { style: feature => gridStyle(feature) });
-
-    const layers = {
-      points: markers,
-      heat: heatLayer,
-      grid: gridLayer
-    };
-
-    // --- UI elements ---
     const addBtn = document.getElementById('addBtn');
     const stopBtn = document.getElementById('stopBtn');
-    const exportBtn = document.getElementById('exportBtn');
-    const importInput = document.getElementById('importInput');
-    const importProxy = document.getElementById('importProxy');
-    const clearBtn = document.getElementById('clearBtn');
     const countEl = document.getElementById('count');
-    const pointsToggle = document.getElementById('pointsToggle');
-    const heatToggle = document.getElementById('heatToggle');
-    const gridToggle = document.getElementById('gridToggle');
+    const statusEl = document.getElementById('status');
 
     let adding = false;
 
-    function refresh() {
+    function render() {
       countEl.textContent = sightings.length;
-      drawMarkers();
-      drawHeat();
-      drawGrid();
-      saveSightings();
-    }
-
-    function drawMarkers() {
-      markers.clearLayers();
-      sightings.forEach(pt => L.circleMarker([pt.lat, pt.lng], {
-        radius: 6, weight: 1.5, color: '#111', fillColor: '#fff', fillOpacity: 0.9
-      }).bindTooltip(new Date(pt.ts).toLocaleString()).addTo(markers));
-    }
-
-    function drawHeat() {
       const heatPoints = sightings.map(pt => [pt.lat, pt.lng, 1.0]);
       heatLayer.setLatLngs(heatPoints);
     }
 
-    function drawGrid() {
-      // Build a 0.5 km square grid over current bounds
-      const b = map.getBounds();
-      const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
-      const cellSide = 0.5; // km
-      const grid = turf.squareGrid(bbox, cellSide, { units: 'kilometers' });
-
-      // points feature collection
-      const pts = turf.featureCollection(
-        sightings.map(pt => turf.point([pt.lng, pt.lat]))
-      );
-
-      // Count points in each cell
-      grid.features.forEach(cell => {
-        const within = turf.pointsWithinPolygon(pts, cell);
-        cell.properties.count = within.features.length;
-      });
-
-      // Update layer
-      gridLayer.clearLayers();
-      gridLayer.addData(grid);
-      updateLegend(grid);
-    }
-
-    function gridStyle(f) {
-      const c = f.properties.count || 0;
-      return {
-        weight: 0.6,
-        color: c > 0 ? '#333' : '#999',
-        fillOpacity: c > 0 ? clamp(0.15 + c * 0.1, 0.15, 0.85) : 0.03,
-        fillColor: colorRamp(c)
-      };
-    }
-
-    function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
-
-    // Simple color ramp (light to intense). No external CSS needed.
-    function colorRamp(count){
-      const palette = ['#f1f8ff','#dbeafe','#bfdbfe','#93c5fd','#60a5fa','#3b82f6','#2563eb','#1d4ed8','#1e40af','#1e3a8a'];
-      const idx = Math.max(0, Math.min(palette.length-1, count));
-      return palette[idx];
-    }
-
-    function updateLegend(grid){
-      const max = Math.max(0, ...grid.features.map(f => f.properties.count||0));
-      const scale = document.getElementById('legendScale');
-      scale.innerHTML = '';
-      const steps = Math.max(5, Math.min(10, max+1));
-      for(let i=0;i<steps;i++){
-        const box = document.createElement('i');
-        box.style.background = colorRamp(i);
-        scale.appendChild(box);
+    async function syncFromRemote() {
+      if(!sb) return;
+      setStatus('Loading…');
+      const { data, error } = await sb.from('sightings')
+        .select('ts,lat,lng')
+        .order('ts', { ascending: true })
+        .limit(10000);
+      if (!error && Array.isArray(data)) {
+        sightings = data.map(r => ({ ts: Number(r.ts)||Date.now(), lat: Number(r.lat), lng: Number(r.lng) }));
+        render();
+        setStatus('');
+      } else {
+        console.warn('Supabase select error', error);
+        setStatus('Failed to load');
       }
     }
 
-    // --- Add mode ---
-    addBtn.addEventListener('click', () => {
-      adding = true; addBtn.classList.add('toggled');
-    });
-    stopBtn.addEventListener('click', () => {
-      adding = false; addBtn.classList.remove('toggled');
-    });
+    async function postSighting(pt){
+      if(!sb) return;
+      setStatus('Saving…');
+      const { error } = await sb.from('sightings').insert({ ts: pt.ts, lat: pt.lat, lng: pt.lng, ua: navigator.userAgent });
+      if (error) {
+        console.warn('Supabase insert error', error);
+        setStatus('Save failed');
+      } else {
+        setStatus('');
+        // Pull latest after save
+        syncFromRemote();
+      }
+    }
 
-    map.on('click', async (e) => {
+    function setStatus(t){ statusEl.textContent = t || ''; }
+
+    // --- Add mode ---
+    addBtn.addEventListener('click', () => { adding = true; addBtn.classList.add('toggled'); });
+    stopBtn.addEventListener('click', () => { adding = false; addBtn.classList.remove('toggled'); });
+
+    map.on('click', (e) => {
       if(!adding) return;
       const { lat, lng } = e.latlng;
       const pt = { lat, lng, ts: Date.now() };
+      // Optimistic UI: update heat immediately
       sightings.push(pt);
-      refresh();
-      postSightingRemote(pt);
+      render();
+      // Save to Supabase (no local persistence)
+      postSighting(pt);
     });
 
-    // --- Import / Export / Clear ---
-    exportBtn.addEventListener('click', () => {
-      const blob = new Blob([JSON.stringify(sightings, null, 2)], {type:'application/json'});
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = 'cat-sightings.json'; a.click();
-      URL.revokeObjectURL(url);
-    });
-
-    importProxy.addEventListener('click', ()=> importInput.click());
-    importProxy.addEventListener('keypress', (e)=>{ if(e.key==='Enter' || e.key===' '){ importInput.click(); }});
-
-    importInput.addEventListener('change', async (e) => {
-      const file = e.target.files[0];
-      if(!file) return;
-      try {
-        const text = await file.text();
-        const data = JSON.parse(text);
-        if(Array.isArray(data)) {
-          sightings = data.filter(p => typeof p.lat==='number' && typeof p.lng==='number')
-                          .map(p => ({ lat: p.lat, lng: p.lng, ts: p.ts || Date.now() }));
-          refresh();
-        } else {
-          alert('Invalid JSON format. Expected an array of {lat, lng, ts}');
-        }
-      } catch(err){
-        alert('Import failed: ' + err.message);
-      } finally {
-        importInput.value = '';
-      }
-    });
-
-    clearBtn.addEventListener('click', () => {
-      if(confirm('Remove all locally stored sightings?')){
-        sightings = []; refresh();
-      }
-    });
-
-    // --- Layer toggles ---
-    function toggle(btn, layer){
-      const active = map.hasLayer(layer);
-      if(active){ map.removeLayer(layer); btn.classList.remove('toggled'); }
-      else { layer.addTo(map); btn.classList.add('toggled'); }
-    }
-
-    pointsToggle.addEventListener('click', () => toggle(pointsToggle, markers));
-    heatToggle.addEventListener('click', () => toggle(heatToggle, heatLayer));
-    gridToggle.addEventListener('click', () => toggle(gridToggle, gridLayer));
-
-    // Recompute grid on move end (viewport defines bbox)
-    map.on('moveend', drawGrid);
-
-    // --- Persistence ---
-    function saveSightings(){
-      try { localStorage.setItem('cat_sightings', JSON.stringify(sightings)); } catch(e) {}
-    }
-    function loadSightings(){
-      try { const raw = localStorage.getItem('cat_sightings'); return raw ? JSON.parse(raw) : []; } catch(e){ return []; }
-    }
-
-    // Init
-    refresh();
-    heatLayer.addTo(map);
-    gridLayer.addTo(map);
-    // Try to fetch shared data if endpoint is configured
+    // Initial load + periodic refresh (no realtime requirement)
     syncFromRemote();
+    setInterval(syncFromRemote, 20000); // refresh every 20s
   </script>
 </body>
 </html>

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Cat Spotter — Kernel Heatmap Only</title>
+  <title>Cat Spotter — Kernel Heatmap + Editable Own Points</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous" />
   <style>
     html, body { height: 100%; margin: 0; }
@@ -13,28 +13,56 @@
       background: #ffffffee; backdrop-filter: blur(6px);
       padding: 12px; border-radius: 14px; box-shadow: 0 6px 20px rgba(0,0,0,.15);
       display: grid; gap: 8px; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      max-width: 360px;
     }
     .control h1 { font-size: 16px; margin: 0 0 6px; }
     .control .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
     button {
       border: 0; border-radius: 10px; padding: 8px 10px; cursor: pointer;
-      background: #111; color: #fff; font-weight: 600;
+      background: #fff; color: #111; font-weight: 600;
+      transition: all 0.2s;
     }
     button.secondary { background: #f2f2f2; color: #111; }
-    button.toggled { outline: 2px solid #111; }
+    button.toggled { background: #111 !important; color: #fff !important; }
+    button:disabled { opacity: 0.5; cursor: default; }
+
+    input[type="text"], input[type="password"] {
+      padding: 6px 8px;
+      border-radius: 8px;
+      border: 1px solid #ccc;
+      font-size: 12px;
+      flex: 1 1 120px;
+    }
+
     .notice { font-size: 12px; color: #444; }
     .count { font-weight: 700; }
+    #status { margin-left: auto; }
   </style>
 </head>
 <body>
-  <div id="map" aria-label="Map of cat sightings (heat only)"></div>
+  <div id="map" aria-label="Map of cat sightings (heat + optional points)"></div>
 
   <div class="control" role="region" aria-label="Controls">
     <h1>🐾 Cat Spotter</h1>
+
     <div class="row">
-      <button id="addBtn" title="Click, then tap the map to add a sighting">Add sighting</button>
+      <button id="addBtn" title="Sign in to add sightings" disabled>Add sighting</button>
       <button id="stopBtn" class="secondary" title="Stop placing points">Stop adding</button>
+      <button id="pointsToggle" class="secondary" title="Show or hide individual points">Show points</button>
     </div>
+
+    <div class="row">
+      <input id="usernameInput" type="text" placeholder="Username" autocomplete="off" />
+      <input id="passwordInput" type="password" placeholder="Password" autocomplete="off" />
+    </div>
+    <div class="row">
+      <button id="signupBtn" class="secondary">Sign up</button>
+      <button id="loginBtn" class="secondary">Log in</button>
+      <button id="signoutBtn" class="secondary" style="display:none">Sign out</button>
+      <span id="userChip" class="notice"></span>
+    </div>
+
     <div class="row notice">
       <span>Total sightings: <span id="count" class="count">0</span></span>
       <span id="status" aria-live="polite"></span>
@@ -54,35 +82,193 @@
     // --- Supabase config ---
     const SUPABASE_URL = 'https://diinrjgkyouofzbeqtyu.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRpaW5yamdreW91b2Z6YmVxdHl1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI5ODkyMTYsImV4cCI6MjA3ODU2NTIxNn0.em0Vqr8Qxyqe9s3rupXZEHBKV4eC1sgLINK2k14dYq4';
-    const sb = (window.supabase) ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+    const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-    // --- State (in-memory only; no localStorage) ---
-    let sightings = []; // [{lat, lng, ts}]
+    // --- State ---
+    let sightings = []; // [{id, lat, lng, ts, user_id}]
+    let currentUser = null;
 
-    const heatLayer = L.heatLayer([], { radius: 22, blur: 18, minOpacity: 0.25 }).addTo(map);
+    const heatLayer   = L.heatLayer([], { radius: 22, blur: 18, minOpacity: 0.25 }).addTo(map);
+    const markers     = L.layerGroup(); // points overlay, toggled via button
 
-    const addBtn = document.getElementById('addBtn');
-    const stopBtn = document.getElementById('stopBtn');
-    const countEl = document.getElementById('count');
-    const statusEl = document.getElementById('status');
+    const addBtn        = document.getElementById('addBtn');
+    const stopBtn       = document.getElementById('stopBtn');
+    const pointsToggle  = document.getElementById('pointsToggle');
+    const signupBtn     = document.getElementById('signupBtn');
+    const loginBtn      = document.getElementById('loginBtn');
+    const signoutBtn    = document.getElementById('signoutBtn');
+    const userChip      = document.getElementById('userChip');
+    const countEl       = document.getElementById('count');
+    const statusEl      = document.getElementById('status');
+    const usernameInput = document.getElementById('usernameInput');
+    const passwordInput = document.getElementById('passwordInput');
 
     let adding = false;
 
+    function setStatus(t){ statusEl.textContent = t || ''; }
+
+    function usernameToEmail(username) {
+      return `${username.trim().toLowerCase()}@cats.local`;
+    }
+
+    function getDisplayName(user) {
+      if (!user) return '';
+      if (user.user_metadata?.username) return user.user_metadata.username;
+      if (user.email) return user.email.split('@')[0];
+      return 'user';
+    }
+
+    // --- Auth UI ---
+    async function refreshAuthUI() {
+      const { data } = await sb.auth.getUser();
+      currentUser = data?.user ?? null;
+
+      if (currentUser) {
+        const name = getDisplayName(currentUser);
+        userChip.textContent = `Signed in as ${name}`;
+        signoutBtn.style.display = '';
+        addBtn.disabled = false;
+        addBtn.title = 'Click, then tap the map to add a sighting';
+      } else {
+        userChip.textContent = 'Not signed in';
+        signoutBtn.style.display = 'none';
+        addBtn.disabled = true;
+        addBtn.title = 'Sign in to add sightings';
+        adding = false;
+        addBtn.classList.remove('toggled');
+        stopBtn.classList.remove('toggled');
+      }
+    }
+
+    signupBtn.addEventListener('click', async () => {
+      const username = usernameInput.value.trim();
+      const password = passwordInput.value;
+      if (!username || !password) {
+        setStatus('Enter username and password');
+        return;
+      }
+      setStatus('Signing up…');
+      const email = usernameToEmail(username);
+      const { error } = await sb.auth.signUp({
+        email,
+        password,
+        options: { data: { username } }
+      });
+      if (error) {
+        console.warn('signup error', error);
+        setStatus('Sign-up failed: ' + error.message);
+      } else {
+        setStatus('Signed up. You may be logged in automatically.');
+        refreshAuthUI();
+      }
+    });
+
+    loginBtn.addEventListener('click', async () => {
+      const username = usernameInput.value.trim();
+      const password = passwordInput.value;
+      if (!username || !password) {
+        setStatus('Enter username and password');
+        return;
+      }
+      setStatus('Logging in…');
+      const email = usernameToEmail(username);
+      const { error } = await sb.auth.signInWithPassword({ email, password });
+      if (error) {
+        console.warn('login error', error);
+        setStatus('Login failed: ' + error.message);
+      } else {
+        setStatus('');
+        refreshAuthUI();
+      }
+    });
+
+    signoutBtn.addEventListener('click', async () => {
+      await sb.auth.signOut();
+      setStatus('');
+      refreshAuthUI();
+    });
+
+    sb.auth.onAuthStateChange(() => {
+      refreshAuthUI();
+    });
+
+    // --- Rendering ---
     function render() {
       countEl.textContent = sightings.length;
       const heatPoints = sightings.map(pt => [pt.lat, pt.lng, 1.0]);
       heatLayer.setLatLngs(heatPoints);
+      if (map.hasLayer(markers)) drawMarkers();
     }
 
+    function drawMarkers(){
+      markers.clearLayers();
+      sightings.forEach(pt => {
+        const isOwner = currentUser && pt.user_id === currentUser.id;
+        let marker;
+
+        if (isOwner) {
+          marker = L.marker([pt.lat, pt.lng], { draggable: true });
+
+          marker.on('dragend', async () => {
+            const { lat, lng } = marker.getLatLng();
+            const { error } = await sb.from('sightings')
+              .update({ lat, lng })
+              .eq('id', pt.id);
+            if (error) {
+              console.warn('update error', error);
+              setStatus('Update failed');
+            } else {
+              setStatus('');
+              syncFromRemote();
+            }
+          });
+
+          marker.bindPopup(
+            `<div><strong>Your sighting</strong><br>${new Date(pt.ts).toLocaleString()}<br>
+             <button class="delete-btn" data-id="${pt.id}">Delete</button></div>`
+          );
+
+          marker.on('popupopen', () => {
+            const btn = document.querySelector(`.delete-btn[data-id="${pt.id}"]`);
+            if (btn) {
+              btn.onclick = async () => {
+                if (!confirm('Delete this sighting?')) return;
+                const { error } = await sb.from('sightings').delete().eq('id', pt.id);
+                if (error) {
+                  console.warn('delete error', error);
+                  setStatus('Delete failed');
+                } else {
+                  setStatus('');
+                  syncFromRemote();
+                }
+              };
+            }
+          });
+        } else {
+          marker = L.circleMarker([pt.lat, pt.lng], {
+            radius: 5, weight: 1.5, color: '#111', fillColor: '#fff', fillOpacity: 0.9
+          }).bindTooltip(new Date(pt.ts).toLocaleString());
+        }
+
+        markers.addLayer(marker);
+      });
+    }
+
+    // --- Load from Supabase ---
     async function syncFromRemote() {
-      if(!sb) return;
       setStatus('Loading…');
       const { data, error } = await sb.from('sightings')
-        .select('ts,lat,lng')
+        .select('id, ts, lat, lng, user_id')
         .order('ts', { ascending: true })
         .limit(10000);
       if (!error && Array.isArray(data)) {
-        sightings = data.map(r => ({ ts: Number(r.ts)||Date.now(), lat: Number(r.lat), lng: Number(r.lng) }));
+        sightings = data.map(r => ({
+          id: r.id,
+          ts: Number(r.ts)||Date.now(),
+          lat: Number(r.lat),
+          lng: Number(r.lng),
+          user_id: r.user_id
+        }));
         render();
         setStatus('');
       } else {
@@ -91,40 +277,69 @@
       }
     }
 
+    // --- Insert new point ---
     async function postSighting(pt){
-      if(!sb) return;
       setStatus('Saving…');
-      const { error } = await sb.from('sightings').insert({ ts: pt.ts, lat: pt.lat, lng: pt.lng, ua: navigator.userAgent });
+      const { error } = await sb.from('sightings').insert({
+        ts: pt.ts,
+        lat: pt.lat,
+        lng: pt.lng,
+        ua: navigator.userAgent
+      });
       if (error) {
         console.warn('Supabase insert error', error);
-        setStatus('Save failed');
+        if (error.message && error.message.toLowerCase().includes('row level security')) {
+          setStatus('Please sign in to add sightings');
+        } else {
+          setStatus('Save failed');
+        }
       } else {
         setStatus('');
-        // Pull latest after save
         syncFromRemote();
       }
     }
 
-    function setStatus(t){ statusEl.textContent = t || ''; }
-
     // --- Add mode ---
-    addBtn.addEventListener('click', () => { adding = true; addBtn.classList.add('toggled'); });
-    stopBtn.addEventListener('click', () => { adding = false; addBtn.classList.remove('toggled'); });
+    addBtn.addEventListener('click', () => {
+      if (!currentUser) return;
+      adding = true;
+      addBtn.classList.add('toggled');
+      stopBtn.classList.remove('toggled');
+    });
 
+    stopBtn.addEventListener('click', () => {
+      adding = false;
+      addBtn.classList.remove('toggled');
+      stopBtn.classList.add('toggled');
+    });
+
+    // --- Points layer toggle ---
+    pointsToggle.addEventListener('click', () => {
+      const visible = map.hasLayer(markers);
+      if (visible) {
+        map.removeLayer(markers);
+        pointsToggle.classList.remove('toggled');
+      } else {
+        drawMarkers();
+        markers.addTo(map);
+        pointsToggle.classList.add('toggled');
+      }
+    });
+
+    // --- Map click to add points ---
     map.on('click', (e) => {
-      if(!adding) return;
+      if(!adding || !currentUser) return;
       const { lat, lng } = e.latlng;
-      const pt = { lat, lng, ts: Date.now() };
-      // Optimistic UI: update heat immediately
+      const pt = { lat, lng, ts: Date.now(), id: null, user_id: currentUser.id };
       sightings.push(pt);
       render();
-      // Save to Supabase (no local persistence)
       postSighting(pt);
     });
 
-    // Initial load + periodic refresh (no realtime requirement)
+    // Init
+    refreshAuthUI();
     syncFromRemote();
-    setInterval(syncFromRemote, 20000); // refresh every 20s
+    setInterval(syncFromRemote, 20000);
   </script>
 </body>
 </html>

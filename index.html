@@ -66,6 +66,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
   <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
     // --- Map setup ---
     const map = L.map('map').setView([47.3769, 8.5417], 12); // Zürich default
@@ -73,40 +74,34 @@
       maxZoom: 19, attribution: '&copy; OpenStreetMap'
     }).addTo(map);
 
-    // --- Remote config & State ---
-    // If you set a Google Apps Script Web App URL here, data will be shared globally.
-    // Leave empty to keep using local-only storage.
-    const REMOTE_ENDPOINT = 'https://script.google.com/macros/s/AKfycbyPtUwgElyJlisK038d6UYYhnVQKHRrZzNtkN6ADMQ6SG57z54EXyBgW8_wYky3iRrH/exec';
+    // --- Supabase config & State ---
+    // Fill these two values from your Supabase project settings
+    const SUPABASE_URL = 'https://diinrjgkyouofzbeqtyu.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRpaW5yamdreW91b2Z6YmVxdHl1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI5ODkyMTYsImV4cCI6MjA3ODU2NTIxNn0.em0Vqr8Qxyqe9s3rupXZEHBKV4eC1sgLINK2k14dYq4';
+    const sb = (window.supabase) ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
     let sightings = loadSightings(); // Array of {lat, lng, ts}
-    let syncing = false;
 
     async function syncFromRemote() {
-      if(!REMOTE_ENDPOINT) return; // skip if not configured
+      if(!sb) return; // skip if not configured
       try {
-        const res = await fetch(REMOTE_ENDPOINT, { method: 'GET' });
-        const json = await res.json();
-        if(json && Array.isArray(json.data)){
-          sightings = json.data
-            .filter(p => typeof p.lat==='number' && typeof p.lng==='number')
-            .map(p => ({ lat: p.lat, lng: p.lng, ts: p.ts || Date.now() }));
+        const { data, error } = await sb.from('sightings')
+          .select('ts,lat,lng')
+          .order('ts', { ascending: true })
+          .limit(10000);
+        if(!error && Array.isArray(data)){
+          sightings = data.map(r => ({ lat: Number(r.lat), lng: Number(r.lng), ts: Number(r.ts) || Date.now() }));
           saveSightings();
           refresh();
-        }
+        } else if (error) { console.warn('Supabase select error', error); }
       } catch (e) { console.warn('Remote sync failed', e); }
     }
 
     async function postSightingRemote(pt){
-      if(!REMOTE_ENDPOINT) return;
+      if(!sb) return;
       try {
-        // Use no-cors + text/plain to avoid CORS preflight for Apps Script
-        await fetch(REMOTE_ENDPOINT + '?ua=' + encodeURIComponent(navigator.userAgent), {
-          method: 'POST',
-          mode: 'no-cors',
-          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify(pt)
-        });
-        // We can't read the response in no-cors mode, but the Sheet will record the row.
+        const { error } = await sb.from('sightings').insert({ ts: pt.ts, lat: pt.lat, lng: pt.lng, ua: navigator.userAgent });
+        if(error) console.warn('Supabase insert error', error);
       } catch(e){ console.warn('Remote post failed', e); }
     }
 

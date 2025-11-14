@@ -8,12 +8,13 @@
   <style>
     html, body { height: 100%; margin: 0; }
     #map { position: absolute; inset: 0; }
+
     .control {
       position: absolute; top: 12px; left: 12px; z-index: 1000;
       background: #ffffffee; backdrop-filter: blur(6px);
       padding: 12px; border-radius: 14px; box-shadow: 0 6px 20px rgba(0,0,0,.15);
       display: grid; gap: 8px; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-      max-width: 360px;
+      max-width: 380px;
     }
     .control h1 { font-size: 16px; margin: 0 0 6px; }
     .control .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -38,6 +39,78 @@
     .notice { font-size: 12px; color: #444; }
     .count { font-weight: 700; }
     #status { margin-left: auto; }
+
+    /* Stats panel */
+    .stats {
+      margin-top: 4px;
+      padding-top: 6px;
+      border-top: 1px solid #e5e5e5;
+      font-size: 12px;
+      color: #333;
+      display: grid;
+      gap: 2px;
+    }
+    .stats-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-weight: 600;
+      margin-bottom: 2px;
+    }
+    .stats-line {
+      display: flex;
+      justify-content: space-between;
+    }
+    .stats-label {
+      color: #666;
+    }
+    .stats-value {
+      font-weight: 600;
+    }
+
+    /* Bottom banner for last hour sightings */
+    #recentBanner {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 900;
+      background: #ffffffee;
+      backdrop-filter: blur(6px);
+      border-top: 1px solid #ddd;
+      padding: 8px 12px;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      font-size: 12px;
+      display: none; /* toggled via JS */
+    }
+    #recentBanner .recent-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 4px;
+      color: #333;
+      font-weight: 600;
+    }
+    #recentBanner .recent-list {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding-top: 2px;
+      scrollbar-width: thin;
+      -webkit-overflow-scrolling: touch;
+    }
+    #recentBanner .recent-pill {
+      border-radius: 999px;
+      border: 1px solid #ddd;
+      padding: 4px 8px;
+      white-space: nowrap;
+      background: #f8f8f8;
+      font-size: 11px;
+    }
+    #recentBanner .recent-empty {
+      font-size: 11px;
+      color: #666;
+    }
   </style>
 </head>
 <body>
@@ -50,6 +123,8 @@
       <button id="addBtn" title="Sign in to add sightings" disabled>Add sighting</button>
       <button id="stopBtn" class="secondary" title="Stop placing points">Stop adding</button>
       <button id="pointsToggle" class="secondary" title="Show or hide individual points">Show points</button>
+      <!-- New toggle for bottom banner -->
+      <button id="recentToggle" class="secondary" title="Show sightings from the last hour">Last hour</button>
     </div>
 
     <div class="row">
@@ -66,6 +141,48 @@
     <div class="row notice">
       <span>Total sightings: <span id="count" class="count">0</span></span>
       <span id="status" aria-live="polite"></span>
+    </div>
+
+    <!-- Stats panel -->
+    <div class="stats" id="statsPanel">
+      <div class="stats-header">
+        <span>Stats</span>
+      </div>
+      <div class="stats-line">
+        <span class="stats-label">All-time</span>
+        <span class="stats-value" id="statTotal">0</span>
+      </div>
+      <div class="stats-line">
+        <span class="stats-label">Last 24 hours</span>
+        <span class="stats-value" id="stat24h">0</span>
+      </div>
+      <div class="stats-line">
+        <span class="stats-label">Last 7 days</span>
+        <span class="stats-value" id="stat7d">0</span>
+      </div>
+      <div class="stats-line">
+        <span class="stats-label">First sighting</span>
+        <span class="stats-value" id="statFirst">–</span>
+      </div>
+      <div class="stats-line">
+        <span class="stats-label">Latest sighting</span>
+        <span class="stats-value" id="statLast">–</span>
+      </div>
+      <div class="stats-line">
+        <span class="stats-label">Center (lat, lng)</span>
+        <span class="stats-value" id="statCenter">–</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom banner: last hour sightings -->
+  <div id="recentBanner" aria-label="Sightings in the last hour">
+    <div class="recent-header">
+      <span>Last hour</span>
+      <span><span id="recentCount">0</span> sightings</span>
+    </div>
+    <div id="recentList" class="recent-list">
+      <span class="recent-empty">No sightings in the last hour.</span>
     </div>
   </div>
 
@@ -94,6 +211,7 @@
     const addBtn        = document.getElementById('addBtn');
     const stopBtn       = document.getElementById('stopBtn');
     const pointsToggle  = document.getElementById('pointsToggle');
+    const recentToggle  = document.getElementById('recentToggle');
     const signupBtn     = document.getElementById('signupBtn');
     const loginBtn      = document.getElementById('loginBtn');
     const signoutBtn    = document.getElementById('signoutBtn');
@@ -103,7 +221,19 @@
     const usernameInput = document.getElementById('usernameInput');
     const passwordInput = document.getElementById('passwordInput');
 
+    const statTotal  = document.getElementById('statTotal');
+    const stat24h    = document.getElementById('stat24h');
+    const stat7d     = document.getElementById('stat7d');
+    const statFirst  = document.getElementById('statFirst');
+    const statLast   = document.getElementById('statLast');
+    const statCenter = document.getElementById('statCenter');
+
+    const recentBanner = document.getElementById('recentBanner');
+    const recentCount  = document.getElementById('recentCount');
+    const recentList   = document.getElementById('recentList');
+
     let adding = false;
+    let recentVisible = false;
 
     function setStatus(t){ statusEl.textContent = t || ''; }
 
@@ -192,12 +322,92 @@
       refreshAuthUI();
     });
 
+    // --- Stats update ---
+    function updateStats() {
+      const total = sightings.length;
+      statTotal.textContent = total;
+
+      if (total === 0) {
+        stat24h.textContent = '0';
+        stat7d.textContent = '0';
+        statFirst.textContent = '–';
+        statLast.textContent = '–';
+        statCenter.textContent = '–';
+        return;
+      }
+
+      const now = Date.now();
+      const dayMs = 24 * 60 * 60 * 1000;
+
+      let last24 = 0;
+      let last7 = 0;
+      let minTs = Infinity;
+      let maxTs = 0;
+      let sumLat = 0;
+      let sumLng = 0;
+
+      for (const s of sightings) {
+        const ts = Number(s.ts) || now;
+        const diff = now - ts;
+
+        if (diff <= dayMs) last24++;
+        if (diff <= 7 * dayMs) last7++;
+
+        if (ts < minTs) minTs = ts;
+        if (ts > maxTs) maxTs = ts;
+
+        sumLat += s.lat;
+        sumLng += s.lng;
+      }
+
+      stat24h.textContent = last24;
+      stat7d.textContent = last7;
+      statFirst.textContent = isFinite(minTs) ? new Date(minTs).toLocaleDateString() : '–';
+      statLast.textContent  = isFinite(maxTs) ? new Date(maxTs).toLocaleDateString() : '–';
+
+      const centerLat = sumLat / total;
+      const centerLng = sumLng / total;
+      statCenter.textContent = `${centerLat.toFixed(4)}, ${centerLng.toFixed(4)}`;
+    }
+
+    // --- Last hour banner update ---
+    function updateRecentBanner() {
+      const now = Date.now();
+      const hourMs = 60 * 60 * 1000;
+
+      const recent = sightings.filter(s => {
+        const ts = Number(s.ts) || now;
+        return (now - ts) <= hourMs;
+      });
+
+      recentCount.textContent = recent.length.toString();
+
+      if (recent.length === 0) {
+        recentList.innerHTML = '<span class="recent-empty">No sightings in the last hour.</span>';
+        return;
+      }
+
+      const itemsHtml = recent
+        .map(s => {
+          const ts = Number(s.ts) || now;
+          const timeStr = new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          const latStr = s.lat.toFixed(4);
+          const lngStr = s.lng.toFixed(4);
+          return `<div class="recent-pill">⏱ ${timeStr} · ${latStr}, ${lngStr}</div>`;
+        })
+        .join('');
+
+      recentList.innerHTML = itemsHtml;
+    }
+
     // --- Rendering ---
     function render() {
       countEl.textContent = sightings.length;
       const heatPoints = sightings.map(pt => [pt.lat, pt.lng, 1.0]);
       heatLayer.setLatLngs(heatPoints);
       if (map.hasLayer(markers)) drawMarkers();
+      updateStats();
+      updateRecentBanner();   // keep banner data in sync
     }
 
     function drawMarkers(){
@@ -323,6 +533,19 @@
         drawMarkers();
         markers.addTo(map);
         pointsToggle.classList.add('toggled');
+      }
+    });
+
+    // --- Recent banner toggle ---
+    recentToggle.addEventListener('click', () => {
+      recentVisible = !recentVisible;
+      if (recentVisible) {
+        recentBanner.style.display = 'block';
+        recentToggle.classList.add('toggled');
+        updateRecentBanner(); // ensure fresh when turned on
+      } else {
+        recentBanner.style.display = 'none';
+        recentToggle.classList.remove('toggled');
       }
     });
 
